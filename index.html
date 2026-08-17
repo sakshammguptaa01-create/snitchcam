@@ -1,60 +1,118 @@
+"""
+Phone-in-class detector
+------------------------
+Uses a webcam (laptop or phone camera streamed as a webcam) plus a
+pretrained YOLOv8 object detection model to flag when a "cell phone"
+is visible in frame, and logs/alerts when it happens.
+
+SETUP
+-----
+1. Create a virtual environment (recommended):
+       python -m venv venv
+       source venv/bin/activate      # on Windows: venv\\Scripts\\activate
+
+2. Install dependencies:
+       pip install ultralytics opencv-python
+
+   The first run of the script will auto-download the small YOLOv8
+   weights file (yolov8n.pt, ~6MB) from Ultralytics.
+
+3. Run it:
+       python phone_detector.py
+
+   Press 'q' to quit the video window.
+
+USING A PHONE AS THE CAMERA (instead of a laptop webcam)
+----------------------------------------------------------
+If you want to use a phone's camera as the video source (e.g. mounted
+at the back of a classroom), the easiest options are:
+  - Install an IP-camera app (e.g. "IP Webcam" on Android, or use
+    your phone's built-in camera via "DroidCam" / "iVCam" on iOS/Android).
+  - The app will give you a stream URL like:
+        http://192.168.1.5:8080/video
+  - Replace CAMERA_SOURCE below with that URL instead of 0.
+
+NOTES / LIMITATIONS
+--------------------
+- This detects when a phone is VISIBLE to the camera, not necessarily
+  that a specific student is actively using it. A phone lying flat on
+  a desk may still trigger a detection.
+- Accuracy depends on camera angle, lighting, and distance. For a
+  classroom-wide view, a wide-angle or ceiling-mounted camera works
+  best, and you may need multiple cameras for full coverage.
+- Consider the privacy/consent implications of recording students —
+  check your school's policy before deploying this in a real classroom.
+"""
+
 import cv2
+import time
+from datetime import datetime
 from ultralytics import YOLO
-import datetime
-import os
 
-# Load pretrained YOLOv8 model (trained on COCO dataset, includes 'cell phone' class)
-model = YOLO("yolov8n.pt")
+# ---------------- CONFIG ----------------
+CAMERA_SOURCE = 0          # 0 = default laptop webcam; or a phone stream URL string
+CONFIDENCE_THRESHOLD = 0.5  # minimum confidence to count as a detection
+ALERT_COOLDOWN_SECONDS = 5  # avoid spamming alerts/logs repeatedly
+LOG_FILE = "phone_detections.log"
+MODEL_WEIGHTS = "yolov8n.pt"  # small, fast model; use yolov8s.pt/yolov8m.pt for better accuracy
+# -----------------------------------------
 
-# Create folder to save snapshots of detected phones
-SAVE_DIR = "detected_phones"
-os.makedirs(SAVE_DIR, exist_ok=True)
-
-# Class ID for "cell phone" in COCO dataset
+# COCO class id for "cell phone" is 67
 PHONE_CLASS_ID = 67
 
-def run_snitch_cam():
-    cap = cv2.VideoCapture(0)  # 0 = default webcam
 
+def log_detection(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {message}"
+    print(line)
+    with open(LOG_FILE, "a") as f:
+        f.write(line + "\n")
+
+
+def main():
+    model = YOLO(MODEL_WEIGHTS)
+
+    cap = cv2.VideoCapture(CAMERA_SOURCE)
     if not cap.isOpened():
-        print("Error: Could not access webcam.")
+        print(f"Could not open camera source: {CAMERA_SOURCE}")
         return
 
-    print("Snitch Cam started. Press 'q' to quit.")
+    last_alert_time = 0
+
+    print("Starting detection. Press 'q' to quit.")
 
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("Failed to grab frame, exiting.")
             break
 
         results = model(frame, verbose=False)[0]
 
-        phone_detected = False
+        phone_detected_this_frame = False
 
         for box in results.boxes:
             cls_id = int(box.cls[0])
             conf = float(box.conf[0])
 
-            if cls_id == PHONE_CLASS_ID and conf > 0.5:
-                phone_detected = True
+            if cls_id == PHONE_CLASS_ID and conf >= CONFIDENCE_THRESHOLD:
+                phone_detected_this_frame = True
+
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-                # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                label = f"Phone Detected ({conf:.2f})"
-                cv2.putText(frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                label = f"Phone {conf:.2f}"
+                cv2.putText(
+                    frame, label, (x1, max(y1 - 10, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
+                )
 
-        if phone_detected:
-            cv2.putText(frame, "ALERT: PHONE DETECTED!", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        if phone_detected_this_frame:
+            now = time.time()
+            if now - last_alert_time > ALERT_COOLDOWN_SECONDS:
+                log_detection("Phone detected in frame.")
+                last_alert_time = now
 
-            # Save a snapshot with timestamp
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(SAVE_DIR, f"phone_{timestamp}.jpg")
-            cv2.imwrite(filename, frame)
-
-        cv2.imshow("Snitch Cam - Phone Detector", frame)
+        cv2.imshow("Phone Detector (press 'q' to quit)", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -64,4 +122,4 @@ def run_snitch_cam():
 
 
 if __name__ == "__main__":
-    run_snitch_cam()
+    main()
